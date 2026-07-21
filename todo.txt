@@ -1,0 +1,34 @@
+confluent's managed offering regardin flink
+
+flink parallelism
+flink internal serializers + schema evolution
+py4j
+stateful flink
+state backends
+schema supports
+checkpointing / fault tolerace + supported storage types
+flink catalog vs external tables
+https://github.com/keycloak/keycloak
+tools to evaluate project health: external dependencies etc
+
+TODO
+- Stomp, serversent events, webservices, grpc / graphql streaming
+- Spark vs storm
+- Iceberg vs athena
+  - why TX matters in analitics
+- Flink exactly once
+- Kafka streams late event handling DONE
+- Numpy
+- Event Storming in practice
+- AWS Fargate
+- Lambda destinations, provisioned concurrency, AWS Telemetry API, EventBridge Pipes, Lambda Function Scaling, Provisioned Poller for LAmbda, Lambda + MCP
+
+- Iceberg: concurrent table write, schema and partition evolution, compression support (with flink) reduced storage ~ cost saving
+- Snowfalke, iceberg - snowflake integration via external / unmanaged tables
+- Trino
+- GraphQL: basics, API versioning
+
+
+Mongo multi region replication
+- retryable reads / writes
+- multi region mongo cluster
