@@ -127,9 +127,30 @@ When transactions run simultaneously without proper isolation, three read bugs c
 Developers use locking paradigms to prevent the "Lost Update" anomaly (where two users read the same value and overwrite each other's changes).
 
 #### 1. Pessimistic Locking
-*   **Philosophy:** "Prevent conflicts by locking immediately."
-*   **Implementation:** Use the `SELECT ... FOR UPDATE` SQL clause to place an Exclusive (Write) Lock on the target rows. Other transactions attempting to read or modify these rows are blocked and put on hold.
-*   **Use Case:** High-conflict scenarios where data correctness is critical (e.g., seat booking systems, financial bank transfers).
+
+* **Philosophy:** "Prevent conflicts by locking immediately."
+
+* **Lock Types:**
+  Pessimistic locking relies on two fundamental lock modes managed by the database's Lock Manager to maintain transaction serializability (Source: CMU):
+
+  *   **Shared (S) Locks (Read Locks):** 
+      *   **Behavior:** Granted to transactions that need to read data. Multiple transactions can concurrently hold S locks on the same resource (Source: CMU). No transaction can write to or modify the resource until all S locks are released (Source: CMU).
+      *   **SQL Syntax:** `SELECT ... FOR SHARE` (or `LOCK IN SHARE MODE` in older MySQL dialects) (Source: Code Curated).
+  *   **Exclusive (X) Locks (Write Locks):** 
+      *   **Behavior:** Granted to a transaction that needs to modify (insert, update, delete) data. Only one transaction can hold an X lock on a resource (Source: CMU). It blocks all other transactions from acquiring any lock (either S or X) on that resource (Source: CMU).
+      *   **SQL Syntax:** `SELECT ... FOR UPDATE` (Source: Code Curated).
+
+* **Lock Compatibility Matrix:**
+
+  | Lock Held \ Lock Requested | Shared (S)                           | Exclusive (X)                      |
+  | :------------------------- | :----------------------------------- | :--------------------------------- |
+  | **Shared (S)**             | ✅ Compatible (Granted) (Source: CMU) | ❌ Conflict (Blocked) (Source: CMU) |
+  | **Exclusive (X)**          | ❌ Conflict (Blocked) (Source: CMU)   | ❌ Conflict (Blocked) (Source: CMU) |
+
+* **Use Cases:** 
+
+  *   **Shared (S) Locks:** Best when a transaction needs to read a record and ensure it is not altered by another transaction before the current operation completes, while still allowing other concurrent processes to read the exact same record safely.
+  *   **Exclusive (X) Locks:** High-conflict scenarios where data correctness is absolutely critical (e.g., reserving a seat in a booking system, executing a bank transfer) and the transaction intends to write/update the data (Source: CMU).
 
 #### 2. Optimistic Locking
 *   **Philosophy:** "Assume conflicts are rare; check for modifications at the finish line."
@@ -218,6 +239,7 @@ Sorted: [Abbott, John] -> [Abbott, Mark] -> [Baker, John] -> [Smith, Alice]
 ```
 
 *   **Left-Prefix Rule:** The index can only be navigated if the leftmost columns of the index are present in the `WHERE` clause.
+    
     *   `WHERE LastName = 'Smith'` ➡️ **Can use index (Seek)**
     *   `WHERE LastName = 'Smith' AND FirstName = 'John'` ➡️ **Can use index (Seek)**
     *   `WHERE FirstName = 'John'` ➡️ **Cannot use index (Requires Table Scan)**
@@ -242,7 +264,3 @@ A **Covering Index** contains all columns requested by a query, allowing the dat
     INCLUDE (Email, Salary);
     ```
     *   *Why it's better:* The database only sorts the index by `LastName` (keeping parent nodes small and sorting costs low). `Email` and `Salary` are simply read from the leaf node when a match is found, eliminating Key Lookups without slowing down write operations.
-
----
-
-This guide covers the core theoretical and practical elements of relational databases, equipping you with the architectural knowledge needed to design scalable, highly performant systems.
