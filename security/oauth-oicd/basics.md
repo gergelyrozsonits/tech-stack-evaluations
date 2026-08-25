@@ -114,3 +114,30 @@ sequenceDiagram
 
 - **Token Isolation Rules:** Access Tokens are for APIs; ID Tokens are for Clients. Parsing or trusting an ID Token at the Resource Server is an architectural anti-pattern because ID Tokens do not express access scopes and bypass the API's security filter boundaries.
 - **BFF Session Management:** Moving to a BFF eliminates browser-side token theft but introduces the complexity of server-side state. Scaling this horizontally requires a fast, highly-available external session store (e.g., Redis) or sticky session routing, adding latency and infrastructural dependencies.
+
+---
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Browser as User Browser / SPA
+    participant Client as Client Application
+    participant IdP as Authorization Server (IdP)
+    Note over Client: 1. Generate code_verifier (random entropy string)<br/>2. Compute code_challenge = Base64URL(SHA256(verifier))
+    User->>Browser: Click Login
+    Browser->>Client: Initiate login sequence
+    Client-->>Browser: Redirect with challenge & method=S256
+    Browser->>IdP: GET /authorize?code_challenge=xyz&code_challenge_method=S256
+    Note over IdP: Store challenge against current session
+    IdP-->>Browser: Render Login Page & Consent
+    User->>Browser: Provide Credentials & Approve Scopes
+    Browser->>IdP: POST Credentials
+    IdP-->>Browser: Redirect with temporary 'code' (Front-Channel)
+    Browser->>Client: Deliver 'code'
+    Client->>IdP: POST /token (code + raw code_verifier)
+    Note over IdP: Verify: Base64URL(SHA256(code_verifier)) == stored challenge
+    IdP-->>Client: Return Access, ID, & Refresh Tokens
+    Client-->>Browser: Complete Login Sequence
+```
+
