@@ -109,9 +109,9 @@ flowchart LR
     C["Client<br/>(Public/Confidential)"] -->|1. redirect to authorize| AS
     AS -->|2. authorization code| C
     C -->|3. exchange code| AS
-    AS -->|4. access token + refresh token<br/>(+ ID token if OIDC)| C
+    AS -->|4. access token + refresh token (+ ID token if OIDC)| C
     C -->|5. access token as bearer| RS["Resource Server"]
-    RS -->|6. validate token<br/>allow/deny| C
+    RS -->|6. validate token allow/deny| C
 ```
 
 ### 3.2 Access Token vs. ID Token — Purpose Boundary
