@@ -1,143 +1,192 @@
-# OAuth & OICD
+# Topic 1: OAuth 2.0 & OIDC Foundations
 
-### 1. Conceptual Deep-Dive & Core Paradigm Shift
+## 1. Introduction
 
-#### Delegated Authorization vs. Authentication
+OAuth 2.0 (RFC 6749) is a **delegated authorization** framework — it allows a **Client** application to obtain limited access to a **Resource Owner's** resources on a **Resource Server**, without ever handling the Resource Owner's credentials, and without the Client needing to know *who* the Resource Owner actually is. OAuth2 answers the question **"what is this bearer allowed to do?"** — it deliberately does not answer **"who is this person, and how strongly did they prove it?"**
 
-- **OAuth 2.0 (Delegated Authorization):** A transport protocol (RFC 6749) designed to issue access permissions (Access Tokens) to third-party client applications without exposing user credentials. It operates like a hotel valet key or keycard; it grants access to specific resources but does not verify identity. The content and format of the Access Token are completely unspecified (treated as a black-box string).
-- **The Limitations of Core OAuth 2.0:** Under the original OAuth 2.0 specification, the format and content of the Access Token are completely unspecified. It is treated as an opaque string. This lack of standardization meant that there was no native way for a Resource Server to validate a token or retrieve identity details (such as a user's email or name) across different vendor implementations without custom, proprietary integration logic.
-- **OpenID Connect (OIDC):** An identity layer built directly on top of the OAuth 2.0 framework. It standardizes identity representation by introducing the **ID Token** (which must always be a JSON Web Token / JWT), standard scopes (like `openid`, `profile`, `email`), and a standardized `/userinfo` endpoint. OIDC is effectively OAuth 2.0 plus a standardized method to extract and exchange identity claims.
+**OpenID Connect (OIDC)** is a thin, standardized **identity layer built on top of OAuth2**. It reuses OAuth2's flows (Authorization Code, etc.) but adds a new artifact — the **ID Token** — plus supporting mechanisms (UserInfo endpoint, standardized identity/authentication claims, Discovery) specifically to answer the authentication question that OAuth2 leaves open.
 
+Understanding *why* this separation exists — and where the boundary lies — is the foundation for every architectural decision covered in the rest of this curriculum (Keycloak, AWS, and Spring Security sections will each build on this core model).
+
+## 2. Core Concepts (as derived through our discussion)
+
+### 2.1 Authentication vs. Authorization — and where OAuth2 fits
+- **Authentication** = "Who are you?" (proving identity)
+- **Authorization** = "What are you allowed to do?" (granting/checking permission)
+- OAuth2's scope is **strictly authorization**. It intentionally does not standardize *how* the Authorization Server authenticates the Resource Owner (password form, MFA, biometrics, social login) — that's implementation-defined by the AS.
+- This is precisely the gap OIDC exists to fill.
+
+### 2.2 The Four OAuth2 Roles
+| Role | Responsibility |
+|---|---|
+| **Resource Owner** | The user (or system) who owns the protected resource and grants consent |
+| **Client** | The application requesting access; public (no secret, e.g. SPA/mobile) or confidential (can hold a secret, e.g. backend server); handles redirects, token storage/exchange |
+| **Authorization Server (AS)** | Authenticates the Resource Owner, obtains consent, issues tokens |
+| **Resource Server (RS)** | Hosts the protected resource; accepts and validates tokens to allow/deny access |
+
+### 2.3 Why the Authorization Code Flow Exists
+Instead of the Client directly collecting the Resource Owner's password (Basic Auth-style), the Authorization Code flow ensures:
+- Credentials are entered **only** on the AS's own login surface — never seen by the Client.
+- The Client only ever receives **tokens**, which represent the Resource Owner going forward, with a reduced/scoped blast radius compared to raw credentials.
+
+### 2.4 Bearer Tokens — What They Actually Guarantee
+- A bearer token (access token) is analogous to a **hotel keycard**: whoever *holds* it can use it. Possession = usage rights. There is **no built-in proof that the holder is the legitimate original recipient**.
+- Security implication: if stolen (XSS, log leakage, malicious redirect), the thief can use it exactly as the legitimate holder could, with no extra proof needed. This drives requirements like TLS-everywhere, short expiry, secure storage, and motivates proof-of-possession extensions (DPoP, mTLS-bound tokens — covered in later security-hardening topic).
+- Tokens can be **opaque** (random reference string, meaningless to the Client) or **JWT** (structured, signed, potentially claim-bearing). OAuth2 does **not** mandate a format — this is a deliberate design freedom.
+  - **Opacity is fundamentally a client-side contract**: the Client must always treat the access token as opaque, regardless of actual format, since the AS could change formats without breaking the Client's contract.
+  - The **Resource Server**, however, is free to interpret a JWT access token's claims directly if the AS is configured to embed them — this is a real architectural choice, not a spec requirement.
+
+### 2.5 Token Validation Placement — Gateway vs. Service vs. Mesh
+- **Gateway-level validation**: centralizes authorization concerns, blocks unauthorized access before it reaches the internal network — but creates a single trust boundary; anything past the gateway is implicitly trusted.
+- **Service-level validation**: protects against threats originating *inside* the trusted network (defense in depth) — but naively done with opaque tokens, it creates a hard dependency (and potential SPOF) on the AS being reachable for every request.
+- **JWT + JWKS mitigates the SPOF concern**: signature validation only requires the AS's public signing key (fetched from the JWKS endpoint and cached) — not a live call per request.
+- **Service mesh** as a middle ground: validation logic is enforced at the service level (defense in depth preserved) without embedding that concern inside each service's own code (sidecar/proxy handles it).
+
+### 2.6 Why "I Got a Token" ≠ "The User Is Logged In"
+This is the central architectural pitfall covered in depth:
+
+1. **Category error — machine identity vs. human identity**: Client Credentials grant issues a perfectly valid access token representing **no human resource owner at all**. If session-creation logic doesn't distinguish flow/grant type, a service account token could be mistaken for a human login.
+2. **Audience/token-confusion attack**: In a shared AS/tenant setup (e.g., one Keycloak realm serving multiple client apps), tokens for *different* apps can be signed by the *same key*. Only the `aud` claim distinguishes "this token is for MyApp" vs. "this token is for Evil.com." If an app fails to check `aud`, a token legitimately issued for a different application could be mistakenly accepted as proof of login — a real vulnerability class.
+   - `aud` validation for **ID tokens** is spec-mandated (OIDC Core) and is the Client's responsibility.
+   - `aud` validation for **access tokens** is reinforced by RFC 9068 (JWT Profile for OAuth2 Access Tokens) and enforced by the Resource Server (or by the AS's introspection endpoint scoping correctly).
+   - The expected `aud` value is a **static configuration value** each party already knows (the Client's own `client_id` for ID tokens; a pre-registered API/Resource-identifier for access tokens — e.g. Keycloak Audience Mapper, AWS Cognito Resource Server identifier).
+3. **No standardized authentication metadata in plain access tokens**: no guaranteed `auth_time`, `acr`, `amr` — meaning no reliable way to answer "was this a fresh login," "was MFA used," without OIDC's ID token.
+
+**Resulting rule of thumb**: *Access token → authorization decisions on a Resource Server. ID token → authentication decisions in the Client (session creation).* Never use an access token alone to decide "is this user logged in."
+
+### 2.7 OIDC's Identity Layer — the ID Token
+The ID Token is a JWT specifically designed for **Client consumption** (never sent to a Resource Server) that standardizes:
+
+| Claim | Meaning |
+|---|---|
+| `sub` | Stable, unique subject identifier for the user (the correct "user ID" to persist — never `email`/`name`) |
+| `iss` | Issuer — which AS/tenant/realm vouches for this token |
+| `aud` | Must equal the Client's own `client_id` — mandatory check, prevents audience mix-up |
+| `auth_time` | When the actual authentication event occurred (may differ from token issuance time, e.g. SSO session reuse) |
+| `acr` | Authentication Context Class Reference — AS-defined strength indicator (e.g., password-only vs. password+MFA) |
+| `amr` | Authentication Methods References — array of actual methods used, e.g. `["pwd","otp"]` |
+| `exp`, `iat`, `nbf` | Standard lifetime claims |
+| `nonce` | Replay protection, echoes value sent in the original auth request |
+| `name`, `email`, `email_verified`, `preferred_username`, `picture`, `locale` | Profile/display claims (note: an unverified email must not be trusted for account linking) |
+
+The **UserInfo endpoint** (OIDC-defined, not core OAuth2) is a related, Client-facing mechanism: the Client calls it using the access token as a bearer credential to fetch fuller profile claims not included in a deliberately minimal ID token.
+
+### 2.8 How a Resource Server Gets Identity/Authentication-Strength Info (Without Being the Client)
+Three real architectural options, in order of increasing sophistication:
+
+- **Option A — Rich JWT access tokens**: The AS is configured (via claim/protocol mappers) to embed `acr`, `amr`, `sub`, or custom claims directly into the *access token* itself. RS reads them with no network call. Common in real deployments.
+- **Option B — Introspection (RFC 7662)**: For opaque tokens, the RS calls the AS's `/introspect` endpoint; the AS returns `active: true/false` plus whatever claims it's configured to expose. This is the RS-side equivalent of what UserInfo is for the Client.
+- **Option C — Push the decision to the AS via scopes (preferred architectural pattern for step-up auth)**: Rather than having every RS interpret `acr`/`amr` semantics, the Client requests a specific scope (e.g. `payments:transfer:high-value`) at authorization time. The AS's policy ties that scope to a required authentication strength and forces re-authentication/MFA if not already satisfied. The AS **only issues the scope in the token if the requirement was actually met** — the Client cannot forge this, since the AS's signature over the token is tamper-evident. The RS then only needs to check for the presence of the scope — a simple, centralized, non-duplicated authorization check.
+
+### 2.9 Opaque Tokens vs. JWTs — Full Trade-off Analysis
+| Concern | JWT (self-contained) | Opaque + Introspection |
+|---|---|---|
+| RS↔AS coupling per request | None (stateless) | Required (network call) |
+| Revocation immediacy | Weak (valid until `exp` unless a deny-list is added) | Strong (instant — AS marks it dead, introspection reflects it immediately) |
+| Claim freshness | Snapshot at issuance (can go stale mid-session, e.g. role changes) | Always live/current |
+| Validation complexity/risk | Distributed to every RS (crypto correctness risk, e.g. `alg:none` attacks) | Centralized at AS (one hardened implementation) |
+| Scalability under high RPS | Better (no AS round-trip) | Worse (AS becomes a scaling/availability dependency) |
+| Typical fit | High-throughput public APIs, microservices | Regulated/compliance-heavy systems requiring instant revocation |
+| Common hybrid | Short-lived JWT access tokens (e.g. 5 min) + refresh token checked live against AS state on each refresh — used by Keycloak/Cognito by default | — |
+
+### 2.10 Resolving the Apparent Identity/Authorization Paradox at the Resource Server
+Scenario: `PATCH /orders/{orderId}` — RS must ensure the caller owns the order.
+
+- RS validates token validity first (signature+expiry for JWT, or introspection result for opaque).
+- RS checks `aud` matches its own registered identifier (defense against audience confusion).
+- RS checks `scope`/role claims to confirm the bearer is permitted to perform `PATCH` on orders at all (coarse-grained authorization).
+- RS compares the token's `sub` value against the order's stored `ownerId` (fine-grained, resource-level authorization).
+- **No ID token is involved** — the ID token is Client-only; the RS relies entirely on the access token's claims or the introspection response.
+
+**Key resolution**: `sub` is an OIDC/identity-shaped claim, but when a Resource Server uses it purely to compare against a stored owner identifier, it is functioning as an **authorization attribute**, not an authentication mechanism. The RS never asks "who is this person" (name, verification method) — only "does this bearer's identifier match the resource's recorded owner." This is **Attribute-Based Access Control (ABAC)**: `sub`, `scope`, `tenant_id`, `role` are all just attributes fed into a policy decision, none of which require the RS to perform authentication.
+
+## 3. Diagrams
+
+### 3.1 The Four Roles and Token Flow (Conceptual)
 ```mermaid
-graph TD
-    subgraph OIDC_Layer ["OpenID Connect Layer"]
-        ID_Token["ID Token: Standardized JWT"]
-        UserInfo_EP["/userinfo Endpoint"]
-        Std_Scopes["Standard Scopes: openid, profile, email"]
-    end
-    
-    subgraph OAuth_Layer ["OAuth 2.0 Layer"]
-        Transport["HTTP Transport & Redirect Grants"]
-        Access_Token["Access Token: Opaque or JWT"]
-        Refresh_Token["Refresh Token: Opaque String"]
-    end
-
-    OIDC_Layer -->|Inherits and runs on top of| OAuth_Layer
+flowchart LR
+    RO["Resource Owner<br/>(User)"] -->|authenticates & consents| AS["Authorization Server"]
+    C["Client<br/>(Public/Confidential)"] -->|1. redirect to authorize| AS
+    AS -->|2. authorization code| C
+    C -->|3. exchange code| AS
+    AS -->|4. access token + refresh token<br/>(+ ID token if OIDC)| C
+    C -->|5. access token as bearer| RS["Resource Server"]
+    RS -->|6. validate token<br/>allow/deny| C
 ```
 
-#### Protocol Boundaries & Authorization Decisions (The Bartender Analogy)
+### 3.2 Access Token vs. ID Token — Purpose Boundary
+```mermaid
+flowchart TB
+    subgraph AS_Issued["Tokens Issued by Authorization Server"]
+        AT["Access Token<br/>(Authorization artifact)"]
+        IDT["ID Token<br/>(Authentication artifact - OIDC only)"]
+    end
+    AT -->|consumed by| RS["Resource Server<br/>Checks: aud, scope, sub-as-attribute"]
+    IDT -->|consumed by| CL["Client Application<br/>Checks: aud==client_id, iss, nonce, auth_time, acr, amr<br/>Decision: create local session?"]
+    RS -.->|"never receives"| IDT
+```
 
-OIDC standardizes the transport of verified identity attributes, but the ultimate authorization decision logic remains **outside** the protocol boundaries.
-
-- **Inside the Protocol:** The Identity Provider (IdP) cryptographically asserts user claims (e.g., signing a JWT payload showing the user's birthdate is `1995-04-12`).
-- **Outside the Protocol:** The Resource Server (acting like a bartender checking an ID card) reads these trusted, tamper-proof claims and executes its own internal business logic (e.g., `if (age < 21) reject()`) to grant or deny access.
-
-#### Handling Opaque Tokens under OIDC
-
-While OIDC mandates that the **ID Token** must be a readable JWT for the client, the **Access Token** can remain completely opaque to the outside world. When an opaque Access Token is utilized:
-
-- The content of the token remains unknown to the client and transit intermediaries.
-- The Resource Server cannot validate the token statelessly. It must query the Authorization Server's standardized **UserInfo Endpoint** or use **Token Introspection (RFC 7662)**, exchanging the opaque token for the corresponding user claims.
-
-#### User Consent ("User Approves App Access")
-
-In the delegation model, the Resource Owner (User) must explicitly consent to the scopes requested by the Client application. This is the runtime user interface prompt (e.g., *"This application would like to view your calendar and email address"*). This step establishes the security boundary, ensuring the Client only receives tokens authorized for those specific, approved scopes.
-
-#### Actors, Identity Providers (IdP), and Social Federation
-
-The ecosystem consists of four standard actors: the **Resource Owner** (User), the **Client** (App), the **Resource Server** (API), and the **Authorization Server/Identity Provider**.
-
-- **Authorization Server (AS):** The OAuth 2.0 engine responsible for validating clients, executing grants, and issuing tokens.
-- **Identity Provider (IdP):** The OIDC/SAML directory responsible for storing user credentials, authenticating users, and managing profiles. (Modern products like Keycloak or AWS Cognito act as both AS and IdP).
-- **Social Sign-In (Identity Federation):** Social providers (such as Google or Facebook) act as external IdPs. In this setup, your primary Authorization Server (e.g., Keycloak) acts as a *Client* to Google. The user authenticates at Google, Google returns an ID Token to Keycloak, and Keycloak maps those attributes into a new local session and token issued to your internal applications.
-
-------
-
-### 2. Token Routing & Multi-Tier Validation Architecture
-
-#### Stateless Access Control on the Resource Server
-
-To maintain a high-performance, stateless microservice mesh, Resource Servers must avoid calling the IdP on every request. This is achieved by utilizing **JWT Access Tokens**:
-
-1. The Authorization Server injects identity claims (like `roles` or custom user attributes) directly into the Access Token.
-2. It signs the Access Token using its asymmetric **private key**.
-3. The Resource Server caches the IdP's public keys from the **JWKS (JSON Web Key Set)** endpoint.
-4. The Resource Server validates the incoming signature locally in memory. If the signature matches, the Resource Server trusts the claims statelessly and executes local access control without any database or network lookups.
-
-#### The Backend For Frontend (BFF) Pattern
-
-Storing raw tokens directly in browser storage (LocalStorage/SessionStorage) makes them vulnerable to exfiltration via **Cross-Site Scripting (XSS)**. The **BFF Pattern** mitigates this by shifting token management to a secure, server-side web component.
-
+### 3.3 Audience Confusion Attack (Why `aud` Validation Matters)
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant Browser as Browser Client
-    participant BFF as BFF (Spring Boot)
-    participant IdP as Identity Provider (IdP)
+    participant U as User
+    participant Evil as Evil.com (Client)
+    participant AS as Shared Authorization Server
+    participant MyApp as MyApp (Client, vulnerable)
+
+    U->>Evil: Logs in via same AS
+    Evil->>AS: Authorization request
+    AS->>Evil: Token (aud = Evil.com)
+    Evil->>MyApp: Malicious redirect delivers Evil's token to MyApp's callback
+    MyApp->>MyApp: ❌ Fails to check aud, accepts token as valid login
+    Note over MyApp: Vulnerability: session created for wrong context
+```
+
+### 3.4 Option C — Step-Up Authentication via Scope Request
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant AS as Authorization Server
     participant RS as Resource Server
 
-    Browser->>BFF: GET /login
-    BFF->>IdP: Redirect to /authorize (Front-Channel)
-    IdP-->>BFF: Return Auth Code via redirect
-    BFF->>IdP: POST /token (Exchange Code via Back-Channel)
-    IdP-->>BFF: Return Access, ID, & Refresh Tokens
-    Note over BFF: Securely store raw tokens in server-side session memory
-    BFF-->>Browser: Set HttpOnly, Secure, SameSite Session Cookie
-    Browser->>BFF: API Request + Session Cookie
-    Note over BFF: Intercept cookie, retrieve Access Token from session
-    BFF->>RS: Forward Request with Authorization: Bearer <Access Token>
+    C->>AS: Authorize request, scope=payments:transfer:high-value
+    AS->>AS: Policy: scope requires MFA
+    AS->>C: Force re-authentication (MFA challenge)
+    C->>AS: MFA completed
+    AS->>C: Access token WITH granted scope (signed)
+    C->>RS: API call + access token
+    RS->>RS: Check scope present? ✅ Simple check, no acr/amr interpretation needed
 ```
 
-**Architectural Considerations of co-located Client/Resource Server architectures:**
+## 4. Glossary
 
-- In classic Spring Boot MVC architectures where the Client and Resource Server are co-located in the same JVM, the client browser only maintains a secure server-side session cookie (`JSESSIONID`).
-- The Spring backend handles the OAuth 2.0 authorization code exchange silently, storing the resulting tokens in the backend session.
-- Even when co-located, internal security filters should validate the **Access Token** (not the ID Token) to authorize backend operations.
-- The client component parses the **ID Token** solely to display user profile details in the UI and to construct the local server-side security context.
-
-------
-
-### 3. Glossary of Terms & Acronyms
-
-| Acronym | Full Name | Definition |
-| ------- | --------- | ---------- |
-| **IdP**  | Identity Provider    | The system hosting user directories and profiles, responsible for verifying credentials (OIDC/SAML). |
-| **AS**   | Authorization Server | The engine issuing OAuth 2.0 tokens based on authenticated authorization. |
-| **RS**   | Resource Server      | The API hosting protected resources, validating Access Tokens to grant access. |
-| **JWT**  | JSON Web Token       | A compact, URL-safe standard (RFC 7519) for representing signed JSON claims. |
-| **BFF**  | Backend For Frontend | An architectural pattern that shifts token storage and session management from the browser to a secure backend. |
-| **JWKS** | JSON Web Key Set     | An endpoint (`/.well-known/jwks.json`) that publishes public keys used to verify JWT signatures. |
-
-------
-
-### 4. Consolidated Knowledge Check Insights
-
-- **Token Isolation Rules:** Access Tokens are for APIs; ID Tokens are for Clients. Parsing or trusting an ID Token at the Resource Server is an architectural anti-pattern because ID Tokens do not express access scopes and bypass the API's security filter boundaries.
-- **BFF Session Management:** Moving to a BFF eliminates browser-side token theft but introduces the complexity of server-side state. Scaling this horizontally requires a fast, highly-available external session store (e.g., Redis) or sticky session routing, adding latency and infrastructural dependencies.
-
----
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant Browser as User Browser / SPA
-    participant Client as Client Application
-    participant IdP as Authorization Server (IdP)
-    Note over Client: 1. Generate code_verifier (random entropy string)<br/>2. Compute code_challenge = Base64URL(SHA256(verifier))
-    User->>Browser: Click Login
-    Browser->>Client: Initiate login sequence
-    Client-->>Browser: Redirect with challenge & method=S256
-    Browser->>IdP: GET /authorize?code_challenge=xyz&code_challenge_method=S256
-    Note over IdP: Store challenge against current session
-    IdP-->>Browser: Render Login Page & Consent
-    User->>Browser: Provide Credentials & Approve Scopes
-    Browser->>IdP: POST Credentials
-    IdP-->>Browser: Redirect with temporary 'code' (Front-Channel)
-    Browser->>Client: Deliver 'code'
-    Client->>IdP: POST /token (code + raw code_verifier)
-    Note over IdP: Verify: Base64URL(SHA256(code_verifier)) == stored challenge
-    IdP-->>Client: Return Access, ID, & Refresh Tokens
-    Client-->>Browser: Complete Login Sequence
-```
-
+| Term | Definition |
+|---|---|
+| **OAuth 2.0** | Delegated authorization framework (RFC 6749); governs how a Client obtains limited access to a resource on behalf of a Resource Owner |
+| **OIDC (OpenID Connect)** | Identity layer built on top of OAuth2; adds the ID Token, UserInfo endpoint, and standardized identity/authentication claims |
+| **Resource Owner** | The user/entity who owns the protected resource |
+| **Client** | The application requesting access; public (no secret) or confidential (can hold a secret) |
+| **Authorization Server (AS)** | Authenticates the Resource Owner and issues tokens |
+| **Resource Server (RS)** | Hosts the protected resource; validates tokens to grant/deny access |
+| **Access Token** | Bearer credential authorizing API calls; format not mandated by spec (opaque or JWT) |
+| **Refresh Token** | Long-lived credential used to obtain new access tokens without re-authenticating |
+| **ID Token** | OIDC-specific JWT proving authentication occurred; Client-facing only, never sent to a Resource Server |
+| **Bearer Token** | A token usable by whoever possesses it — no built-in proof of legitimate ownership |
+| **Opaque Token** | A token with no inherent structure/meaning to the Client; requires introspection to interpret |
+| **JWT (JSON Web Token)** | Structured, signed (and optionally encrypted) token format; can carry claims readable by any party with the verification key |
+| **JWKS (JSON Web Key Set)** | Endpoint exposing the AS's public keys, used to verify JWT signatures without a live AS call per request |
+| **Introspection (RFC 7662)** | AS endpoint (`/introspect`) that a Resource Server calls to check an opaque (or JWT) token's validity and claims |
+| **UserInfo Endpoint** | OIDC endpoint the Client calls (using the access token) to fetch additional identity claims |
+| **`sub`** | Subject claim — stable, unique identifier for the authenticated entity |
+| **`aud`** | Audience claim — identifies the intended recipient (Client `client_id` for ID tokens; API/resource identifier for access tokens) |
+| **`iss`** | Issuer claim — identifies which AS/tenant/realm issued the token |
+| **`auth_time`** | Timestamp of the actual authentication event |
+| **`acr`** (Authentication Context Class Reference) | AS-defined indicator of authentication strength |
+| **`amr`** (Authentication Methods References) | Array of the specific authentication methods used (e.g., `pwd`, `otp`, `fido`) |
+| **`nonce`** | Value echoed in the ID token to prevent replay attacks |
+| **Audience/Token Confusion Attack** | Exploit where a token valid for one Client/RS is mistakenly accepted by another due to missing `aud` validation |
+| **Client Credentials Grant** | OAuth2 grant for machine-to-machine auth; no human Resource Owner involved |
+| **Step-Up Authentication** | Forcing stronger authentication (e.g., MFA) mid-session for sensitive operations, typically triggered via scope/`acr_values`/`claims` request parameters |
+| **ABAC (Attribute-Based Access Control)** | Authorization model where claims/attributes (e.g., `sub`, `scope`, `tenant_id`) are evaluated against policy, without requiring the evaluator to "know" the user in an identity sense |
+| **RFC 9068** | JWT Profile for OAuth 2.0 Access Tokens — standardizes claims like `aud` for access tokens |
+| **DPoP / mTLS-bound tokens** | Extensions moving away from pure bearer semantics toward proof-of-possession (covered in later security topic) |
