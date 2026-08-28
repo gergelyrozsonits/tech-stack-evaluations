@@ -105,11 +105,11 @@ Scenario: `PATCH /orders/{orderId}` — RS must ensure the caller owns the order
 ### 3.1 The Four Roles and Token Flow (Conceptual)
 ```mermaid
 flowchart LR
-    RO["Resource Owner<br/>(User)"] -->|authenticates & consents| AS["Authorization Server"]
+    RO["Resource Owner (User)"] -->|authenticates & consents| AS["Authorization Server"]
     C["Client<br/>(Public/Confidential)"] -->|1. redirect to authorize| AS
     AS -->|2. authorization code| C
     C -->|3. exchange code| AS
-    AS -->|4. access token + refresh token (+ ID token if OIDC)| C
+    AS -->|"4. access token + refresh token (+ ID token if OIDC)"| C
     C -->|5. access token as bearer| RS["Resource Server"]
     RS -->|6. validate token allow/deny| C
 ```
