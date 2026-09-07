@@ -1,5 +1,6 @@
 
 
+
 # Redis Systems Architecture Reference Manual
 
 ---
@@ -8,18 +9,57 @@
 
 | Section | Target Component | Core Logic & Features |
 | :--- | :--- | :--- |
-| **[1. Thread Management & Core Execution](#1-thread-management)** | Main Event Loop & Thread Pools | Single-Threaded Core Engine, Multi-Threaded I/O, Synchronization Barrier [dragonflydb.io, strikefreedom.top] |
-| **[2. Persistence Architectures](#2-persistence-architectures)** | Storage Layer | Point-in-Time RDB, Multi-Part AOF, Durability Policies [redis.io] |
-| **[3. Standard Replication & PSYNC](#3-replication-psync)** | Node-to-Node Data Transfer | Asynchronous Handshakes, Replication Offsets, Shared Buffer [systeminternals.dev, redisgate.jp] |
-| **[4. Replication Topologies & Routing](#4-replication-topologies)** | Distributed Architecture | Active-Passive Read/Write Splitting, Multi-Region Active-Active [oneuptime.com, redis.io] |
-| **[5. Read-Write Consistency Guarantees](#5-consistency-guarantees)** | Data Safety Layer | Stale-Read Solutions, WAIT, WAITAOF, Split-Brain Protection [redisgate.jp] |
-| **[6. Node Health & Topology Heartbeats](#6-health-monitoring)** | Cluster Coordination | PING-PONG, REPLCONF ACK Pipeline [redisgate.jp] |
-| **[7. Appendix: Auxiliary Technologies](#7-appendix)** | Non-Redis Protocols | [I/O Multiplexing](#app-multiplexing), [DNS Anycast](#app-anycast), [BGP](#app-bgp), [Spinlocks vs Mutexes](#app-spinlocks), [Vector Clocks](#app-vclocks), [Copy-on-Write](#app-cow) |
+| **[1. Core Foundations (Keyspace & Commands)](#1-core-foundations)** | Key-Value Storage | redisDb representation, redisObject encapsulation, SDS, and lookup flow [codeburst.io] |
+| **[2. Thread Management & Core Execution](#2-thread-management)** | Main Event Loop & Thread Pools | Single-Threaded Core Engine, Multi-Threaded I/O, Synchronization Barrier [dragonflydb.io, strikefreedom.top] |
+| **[3. Persistence Architectures](#3-persistence-architectures)** | Storage Layer | Point-in-Time RDB, Multi-Part AOF, Durability Policies [redis.io] |
+| **[4. Standard Replication & PSYNC](#4-replication-psync)** | Node-to-Node Data Transfer | Asynchronous Handshakes, Replication Offsets, Shared Buffer [systeminternals.dev, redisgate.jp] |
+| **[5. Replication Topologies & Routing](#5-replication-topologies)** | Distributed Architecture | Active-Passive Read/Write Splitting, Multi-Region Active-Active [oneuptime.com, redis.io] |
+| **[6. Read-Write Consistency Guarantees](#6-consistency-guarantees)** | Data Safety Layer | Stale-Read Solutions, WAIT, WAITAOF, Split-Brain Protection [redisgate.jp] |
+| **[7. Node Health & Topology Heartbeats](#7-health-monitoring)** | Cluster Coordination | PING-PONG, REPLCONF ACK Pipeline [redisgate.jp] |
+| **[8. Appendix: Auxiliary Technologies](#8-appendix)** | Non-Redis Protocols | [I/O Multiplexing](#app-multiplexing), [DNS Anycast](#app-anycast), [BGP](#app-bgp), [Spinlocks vs Mutexes](#app-spinlocks), [Vector Clocks](#app-vclocks), [Copy-on-Write](#app-cow) |
 
 ---
 
-<a id="1-thread-management"></a>
-### 1. Thread Management & Core Execution
+<a id="1-core-foundations"></a>
+### 1. Core Foundations (Keyspace & Commands)
+
+To understand how Redis achieves rapid data operations ($O(1)$ average complexity for most lookups), we must first analyze its internal memory layout and keyspace design [codeburst.io].
+
+#### The Database Internal Representation
+```
+                     ┌────────────────── redisDb ──────────────────┐
+                     │                                             │
+                     ├── dict (Main Keyspace)                      └── expires (TTL Space)
+                     │    └── dictht [ht[0]]                           └── dictht [ht[0]]
+                     │         └── dictEntry                                └── dictEntry
+                     │              ├── Key (SDS String)                         ├── Key (SDS String)
+                     │              └── Value (redisObject)                      └── Value (Expiry Timestamp)
+```
+
+#### Under the Hood Mechanics
+1. **The Database Structure (`redisDb`):** Every Redis database is tracked by a C-language structure called `redisDb` [codeburst.io]. It contains two primary hash tables [codeburst.io]:
+   * **`dict` (The Main Keyspace):** Maps a string key to a values payload container (`redisObject`) [codeburst.io].
+   * **`expires` (The Expiry Dictionary):** Maps a string key to a 64-bit absolute UNIX epoch millisecond timestamp representing its Time-To-Live (TTL). Keys without an explicit TTL do not populate this table, which minimizes memory waste.
+2. **Simple Dynamic Strings (SDS):** Keys are never stored as raw C null-terminated strings. Redis wraps them in an **SDS (Simple Dynamic String)** header that explicitly tracks string length and remaining buffer space. This prevents buffer overflows and allows $O(1)$ string length checks.
+3. **The Hash Table Dictionary (`dict`):** 
+   * Each dictionary contains an array of two hash tables (`ht[0]` and `ht[1]`) to facilitate **Incremental Rehashing**. If the load factor becomes too high, Redis slowly migrates entries from `ht[0]` to `ht[1]` over successive read/write command iterations to avoid blocking the server.
+   * Collisions are handled using **Separate Chaining** (linked lists linked via `dictEntry->next` pointers).
+4. **The Redis Object Container (`redisObject`):** Every database value is wrapped in a `redisObject` header [codeburst.io]:
+   * **`type`:** Defines the user-facing data type (String, List, Hash, Set, Sorted Set) [codeburst.io].
+   * **`encoding`:** Defines the physical C data structure used in RAM [codeburst.io] (e.g., small lists use a memory-packed `listpack`, while large lists transition to a pointer-linked `quicklist`).
+   * **`ptr`:** Points to the actual allocated memory location of the underlying data structure [codeburst.io].
+
+#### How Commands Traverse the Keyspace
+When a client executes a command (e.g., `SET key val` or `HSET hash field val`):
+1. The request is read, parsed, and stored as an array of SDS strings in `client->argv` [strikefreedom.top].
+2. Redis performs a hash lookup on the key using the **MurmurHash2** algorithm, finding the active bucket inside `ht[0]`.
+3. Before executing the operation, it evaluates the key's state in the `expires` dictionary. If the TTL has passed, the key is lazily deleted on the spot.
+4. If valid, Redis modifies the target structure pointed to by `redisObject->ptr` [codeburst.io] or allocates a new dictionary node if the key is new.
+
+---
+
+<a id="2-thread-management"></a>
+### 2. Thread Management & Core Execution
 
 The core of Redis is designed around a single-threaded execution model to ensure absolute atomicity, maximize cache efficiency, and eliminate locking overhead [dragonflydb.io]. To scale with modern networks, high-cost network parsing tasks are offloaded to background helper threads without modifying the sequential execution pipeline [strikefreedom.top].
 
@@ -80,8 +120,8 @@ The lock-free spinlock barrier is logically mandatory to enforce three core inva
 
 ---
 
-<a id="2-persistence-architectures"></a>
-### 2. Persistence Architectures
+<a id="3-persistence-architectures"></a>
+### 3. Persistence Architectures
 
 To ensure durability across restarts and crash recovery, Redis utilizes two distinct persistence models: point-in-time snapshots and change-logging files [redis.io].
 
@@ -131,8 +171,8 @@ To ensure durability across restarts and crash recovery, Redis utilizes two dist
 
 ---
 
-<a id="3-replication-psync"></a>
-### 3. Replication Protocol (PSYNC)
+<a id="4-replication-psync"></a>
+### 4. Replication Protocol (PSYNC)
 
 Replication coordinates node data streams to enable scale-out reads and warm-standby high availability [oneuptime.com].
 
@@ -190,7 +230,7 @@ sequenceDiagram
 ---
 
 <a id="4-replication-topologies"></a>
-### 4. Replication Topologies & Routing
+### 5. Replication Topologies & Routing
 
 Distributed Redis systems can be organized as simple local high-availability setups or globally distributed systems [oneuptime.com, redis.io].
 
@@ -227,7 +267,7 @@ Active-Passive (Default)                 Active-Active (Enterprise CRDT)
 ---
 
 <a id="5-consistency-guarantees"></a>
-### 5. Read-Write Consistency Guarantees
+### 6. Read-Write Consistency Guarantees
 
 Redis replication is asynchronous by default to maximize performance, which can result in stale reads [oneuptime.com]. When data safety is critical, Redis provides mechanisms to enforce stronger consistency guarantees [redisgate.jp].
 
@@ -285,7 +325,7 @@ Redis replication is asynchronous by default to maximize performance, which can 
 ---
 
 <a id="6-health-monitoring"></a>
-### 6. Node Health & Topology Heartbeats
+### 7. Node Health & Topology Heartbeats
 
 To maintain cluster state and coordinate failovers, Redis uses a continuous background heartbeat protocol.
 
@@ -315,7 +355,7 @@ To maintain cluster state and coordinate failovers, Redis uses a continuous back
 ---
 
 <a id="7-appendix"></a>
-### 7. Appendix: Auxiliary Technologies
+### 8. Appendix: Auxiliary Technologies
 
 ---
 
