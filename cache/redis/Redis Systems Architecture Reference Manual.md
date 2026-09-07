@@ -33,7 +33,7 @@ sequenceDiagram
     participant DB as Core Keyspace (Memory)
 
     Epoll->>Main: Read event triggered on client sockets
-    Main->>Main: Postpone read; queue client contexts
+    Main->>Main: Postpone read and queue client contexts
     Main->>Workers: Fan-out: Assign clients (Round-Robin)
     activate Workers
     Workers->>Workers: Read raw TCP stream & parse commands into client buffers
