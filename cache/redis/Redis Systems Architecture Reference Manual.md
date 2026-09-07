@@ -1,18 +1,20 @@
+
+
 # Redis Systems Architecture Reference Manual
 
 ---
 
 ### Reference Architecture Directory
 
-| Section                                                      | Target Component               | Core Logic & Features                                        |
-| :----------------------------------------------------------- | :----------------------------- | :----------------------------------------------------------- |
+| Section | Target Component | Core Logic & Features |
+| :--- | :--- | :--- |
 | **[1. Thread Management & Core Execution](#1-thread-management)** | Main Event Loop & Thread Pools | Single-Threaded Core Engine, Multi-Threaded I/O, Synchronization Barrier [dragonflydb.io, strikefreedom.top] |
-| **[2. Persistence Architectures](#2-persistence-architectures)** | Storage Layer                  | Point-in-Time RDB, Multi-Part AOF, Durability Policies [redis.io] |
-| **[3. Standard Replication & PSYNC](#3-replication-psync)**  | Node-to-Node Data Transfer     | Asynchronous Handshakes, Replication Offsets, Shared Buffer [systeminternals.dev, redisgate.jp] |
-| **[4. Replication Topologies & Routing](#4-replication-topologies)** | Distributed Architecture       | Active-Passive Read/Write Splitting, Multi-Region Active-Active [oneuptime.com, redis.io] |
-| **[5. Read-Write Consistency Guarantees](#5-consistency-guarantees)** | Data Safety Layer              | Stale-Read Solutions, WAIT, WAITAOF, Split-Brain Protection [redisgate.jp] |
-| **[6. Node Health & Topology Heartbeats](#6-health-monitoring)** | Cluster Coordination           | PING-PONG, REPLCONF ACK Pipeline [redisgate.jp]              |
-| **[7. Appendix: Auxiliary Technologies](#7-appendix)**       | Non-Redis Protocols            | [I/O Multiplexing](#app-multiplexing), [DNS Anycast](#app-anycast), [BGP](#app-bgp), [Spinlocks vs Mutexes](#app-spinlocks), [Vector Clocks](#app-vclocks), [Copy-on-Write](#app-cow) |
+| **[2. Persistence Architectures](#2-persistence-architectures)** | Storage Layer | Point-in-Time RDB, Multi-Part AOF, Durability Policies [redis.io] |
+| **[3. Standard Replication & PSYNC](#3-replication-psync)** | Node-to-Node Data Transfer | Asynchronous Handshakes, Replication Offsets, Shared Buffer [systeminternals.dev, redisgate.jp] |
+| **[4. Replication Topologies & Routing](#4-replication-topologies)** | Distributed Architecture | Active-Passive Read/Write Splitting, Multi-Region Active-Active [oneuptime.com, redis.io] |
+| **[5. Read-Write Consistency Guarantees](#5-consistency-guarantees)** | Data Safety Layer | Stale-Read Solutions, WAIT, WAITAOF, Split-Brain Protection [redisgate.jp] |
+| **[6. Node Health & Topology Heartbeats](#6-health-monitoring)** | Cluster Coordination | PING-PONG, REPLCONF ACK Pipeline [redisgate.jp] |
+| **[7. Appendix: Auxiliary Technologies](#7-appendix)** | Non-Redis Protocols | [I/O Multiplexing](#app-multiplexing), [DNS Anycast](#app-anycast), [BGP](#app-bgp), [Spinlocks vs Mutexes](#app-spinlocks), [Vector Clocks](#app-vclocks), [Copy-on-Write](#app-cow) |
 
 ---
 
@@ -23,7 +25,7 @@ The core of Redis is designed around a single-threaded execution model to ensure
 
 #### The Multi-Threaded I/O Pipeline
 ```mermaid
-sequence-diagram
+sequenceDiagram
     autonumber
     participant Epoll as OS Multiplexer (epoll)
     participant Main as Main Thread
@@ -144,7 +146,7 @@ Replication coordinates node data streams to enable scale-out reads and warm-sta
   $$\text{PSYNC } \langle\text{replid}\rangle \text{ } \langle\text{offset}\rangle$$
 
 ```mermaid
-sequence-diagram
+sequenceDiagram
     autonumber
     participant Replica as Replica Instance
     participant Master as Master Instance
